@@ -306,6 +306,11 @@ private:
 
    VkPhysicalDeviceMemoryProperties2 m_memory_props;
 
+   /** X11 atoms and root window for WM_PING response in DRI3 event drain. */
+   xcb_atom_t m_wm_protocols_atom = XCB_ATOM_NONE;
+   xcb_atom_t m_net_wm_ping_atom = XCB_ATOM_NONE;
+   xcb_window_t m_root_window = XCB_NONE;
+
    void present_event_thread();
    bool m_present_event_thread_run;
    std::thread m_present_event_thread;

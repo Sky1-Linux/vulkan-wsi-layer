@@ -367,6 +367,29 @@ VkResult swapchain::init_platform(VkDevice device, const VkSwapchainCreateInfoKH
    m_bypass_deferred_release = (m_presenter == presenter_type::WAYLAND_BYPASS ||
                                 m_presenter == presenter_type::DRI3);
 
+   /* Resolve X11 atoms for WM_PING response (DRI3 event drain needs these
+    * to reply to the window manager's liveness checks). */
+   if (m_presenter == presenter_type::DRI3)
+   {
+      auto setup = xcb_get_setup(m_connection);
+      m_root_window = xcb_setup_roots_iterator(setup).data->root;
+
+      auto wm_cookie = xcb_intern_atom(m_connection, 0, 12, "WM_PROTOCOLS");
+      auto ping_cookie = xcb_intern_atom(m_connection, 0, 12, "_NET_WM_PING");
+      auto *wm_reply = xcb_intern_atom_reply(m_connection, wm_cookie, nullptr);
+      auto *ping_reply = xcb_intern_atom_reply(m_connection, ping_cookie, nullptr);
+      if (wm_reply)
+      {
+         m_wm_protocols_atom = wm_reply->atom;
+         free(wm_reply);
+      }
+      if (ping_reply)
+      {
+         m_net_wm_ping_atom = ping_reply->atom;
+         free(ping_reply);
+      }
+   }
+
    try
    {
       m_present_event_thread = std::thread(&swapchain::present_event_thread, this);
@@ -816,18 +839,37 @@ void swapchain::present_event_thread()
          continue;
       }
 
-      /* DRI3 mode: XCB_PRESENT_OPTION_COPY + immediate release means
-       * buffers are freed right after present.  We still need to drain
-       * the XCB event queue (Expose, ConfigureNotify, etc.) to prevent
-       * event backlog on the shared connection. */
+      /* DRI3 mode: drain XCB events to prevent socket backpressure from
+       * blocking xcb_present_pixmap (apps like FurMark that don't drain
+       * their own event queue would stall on the first frame otherwise).
+       *
+       * We must respond to _NET_WM_PING ourselves since we're consuming
+       * events that the app's event loop would normally handle — without
+       * the pong reply, the window manager marks the app as unresponsive. */
       if (m_presenter == presenter_type::DRI3)
       {
          thread_status_lock.unlock();
 
-         /* Drain all pending X11 events. */
          xcb_generic_event_t *event;
          while ((event = xcb_poll_for_event(m_connection)) != nullptr)
+         {
+            /* Respond to WM_PING to prevent "not responding" grey-out. */
+            if ((event->response_type & 0x7f) == XCB_CLIENT_MESSAGE)
+            {
+               auto *cm = reinterpret_cast<xcb_client_message_event_t *>(event);
+               if (cm->type == m_wm_protocols_atom && cm->data.data32[0] == m_net_wm_ping_atom
+                   && m_net_wm_ping_atom != XCB_ATOM_NONE)
+               {
+                  /* Pong: send the same event back to the root window. */
+                  cm->window = m_root_window;
+                  xcb_send_event(m_connection, 0, m_root_window,
+                                 XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY | XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT,
+                                 reinterpret_cast<const char *>(cm));
+                  xcb_flush(m_connection);
+               }
+            }
             free(event);
+         }
 
          thread_status_lock.lock();
          m_thread_status_cond.wait_for(thread_status_lock, std::chrono::milliseconds(4));
