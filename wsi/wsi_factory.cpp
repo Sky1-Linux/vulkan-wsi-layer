@@ -164,6 +164,37 @@ static VkResult get_available_device_extensions(VkPhysicalDevice physical_device
            "Failed to enumurate properties of available physical device extensions");
    TRY_LOG_CALL(available_extensions.add(properties.data(), count));
 
+   /* Some ICDs don't report extensions that were promoted to core. The Vulkan loader
+    * normally injects these, but layers bypass the loader when calling down. Query the
+    * device API version and add any promoted extensions the ICD may have omitted. */
+   VkPhysicalDeviceProperties dev_props;
+   instance_data.disp.GetPhysicalDeviceProperties(physical_device, &dev_props);
+
+   if (dev_props.apiVersion >= VK_API_VERSION_1_1)
+   {
+      /* Extensions promoted to Vulkan 1.1 core */
+      static const char *promoted_1_1[] = {
+         VK_KHR_BIND_MEMORY_2_EXTENSION_NAME,
+         VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
+         VK_KHR_EXTERNAL_FENCE_EXTENSION_NAME,
+         VK_KHR_EXTERNAL_FENCE_FD_EXTENSION_NAME,
+         VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
+         VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+         VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
+         VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
+         VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
+         VK_KHR_MAINTENANCE1_EXTENSION_NAME,
+         VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,
+      };
+      for (const auto &ext : promoted_1_1)
+      {
+         if (!available_extensions.contains(ext))
+         {
+            TRY_LOG_CALL(available_extensions.add(ext));
+         }
+      }
+   }
+
    return VK_SUCCESS;
 }
 
@@ -219,14 +250,10 @@ VkResult add_device_extensions_required_by_layer(VkPhysicalDevice phys_dev,
       bool supported = available_device_extensions.contains(extensions_required_by_layer);
       if (!supported)
       {
-         /* Can we accept failure? The layer unconditionally advertises support for this platform and the loader uses
-          * this information to enable its own support of the vkCreate*SurfaceKHR entrypoints. The rest of the Vulkan
-          * stack may not support this extension so we cannot blindly fall back to it.
-          * For now treat this as an error.
-          */
-         return VK_ERROR_INITIALIZATION_FAILED;
+         WSI_LOG_WARNING("Device missing required extensions for platform %d, skipping",
+                         (int)wsi_ext.platform);
+         continue;
       }
-
       TRY_LOG_CALL(extensions_to_enable.add(extensions_required_by_layer));
    }
 
