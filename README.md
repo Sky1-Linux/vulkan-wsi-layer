@@ -1,219 +1,140 @@
-# Vulkan® Window System Integration Layer
+# Vulkan WSI Layer (Sky1 fork)
 
-## Introduction
+A Vulkan layer that intercepts window system integration (WSI) calls and
+provides swapchain, surface, and presentation support for GPUs whose ICD
+lacks native WSI -- such as the Mali vendor driver, which exposes no DRM
+render node and therefore cannot use standard Mesa WSI paths.
 
-This project is a Vulkan® layer which implements some of the Vulkan® window system
-integration extensions such as `VK_KHR_swapchain`. The layer is designed to be
-GPU vendor agnostic when used as part of the Vulkan® ICD/loader architecture.
+This is a fork of [Arm's vulkan-wsi-layer](https://gitlab.freedesktop.org/mesa/vulkan-wsi-layer)
+via [ginkage's fork](https://github.com/ginkage/vulkan-wsi-layer), which
+added X11 MIT-SHM presentation support. Our additions center on
+multi-presenter X11 support with automatic routing between three
+presentation backends.
 
-Our vision for the project is to become the de facto implementation for Vulkan®
-window system integration extensions so that they need not be implemented in the
-ICD; instead, the implementation of these extensions are shared across vendors
-for mutual benefit.
+## X11 presentation modes
 
-The project currently implements support for `VK_EXT_headless_surface` and
-its dependencies. Experimental support for `VK_KHR_wayland_surface` can be
-enabled via a build option [as explained below](#building-with-wayland-support).
+The layer selects an X11 presenter automatically per application:
 
-### Implemented Vulkan® extensions
+| Priority | Presenter | Transport | Use case |
+|----------|-----------|-----------|----------|
+| 1 | Wayland bypass | DMA-BUF via `zwp_linux_dmabuf_v1` | Zink / GL apps under Xwayland |
+| 2 | DRI3 | XCB Present extension (COPY) | Native Vulkan apps |
+| 3 | SHM | CPU copy via MIT-SHM | Fallback, always available |
 
-The Vulkan® WSI Layer in addition to the window system integration extensions
-implements the following extensions:
-* Instance extensions
-  * VK_KHR_get_surface_capabilities2
-  * VK_EXT_surface_maintenance1
-* Device extensions
-  * VK_KHR_shared_presentable_image
-  * VK_EXT_image_compression_control_swapchain
-  * VK_KHR_present_id
-  * VK_EXT_swapchain_maintenance1
+**Wayland bypass** detects Xwayland, opens a direct Wayland connection to
+the compositor, and presents DMA-BUFs zero-copy. A 2-frame deferred buffer
+release ring prevents FBO flicker caused by implicit sync races (compositor
+still reading a buffer while the app clears the next frame). Bypass state
+is stored in `x11::surface` and persists across swapchain recreations,
+avoiding compositor window create/destroy animations.
+
+**DRI3** uses the XCB Present extension with `COPY` semantics. It provides
+proper window decorations under Xwayland and is the default for direct
+Vulkan applications.
+
+**SHM** performs a CPU-side copy via MIT-SHM shared memory. It serves as
+the universal fallback. ARM NEON-optimized copy is enabled automatically on
+AArch64.
+
+### Auto-detection
+
+Zink apps are detected via `/proc/self/maps` (presence of `libzink`) or
+the `MESA_LOADER_DRIVER_OVERRIDE=zink` environment variable, and are routed
+to the Wayland bypass presenter. Direct Vulkan apps receive DRI3. Per-app
+overrides can be configured in `/etc/sky1/wsi-routing.conf`.
+
+### Environment variables
+
+| Variable | Effect |
+|----------|--------|
+| `WSI_NO_WAYLAND_BYPASS=1` | Disable Wayland bypass, fall back to DRI3/SHM |
+
+## Key changes from upstream
+
+- **Multi-presenter routing** -- automatic backend selection with fallback
+  chain (bypass -> DRI3 -> SHM)
+- **Xwayland bypass** -- zero-copy DMA-BUF presentation to the Wayland
+  compositor, bypassing X11 entirely for GL/Zink workloads
+- **Deferred buffer release** -- 2-frame ring prevents implicit sync races
+  between compositor reads and app rendering
+- **Fast swapchain teardown** -- semaphore post on teardown avoids a 250ms
+  stall in the page-flip thread
+- **Vulkan 1.1 promoted extension injection** -- fixes ICDs that do not
+  advertise core-promoted extensions at the device level
+- **Non-fatal per-device extension check** -- allows multi-GPU
+  configurations where devices expose different extension sets
+- **`VK_PRESENT_MODE_IMMEDIATE_KHR`** support for X11 surfaces
+
+## Implemented extensions
+
+Instance extensions:
+- `VK_KHR_surface`
+- `VK_KHR_xcb_surface` / `VK_KHR_xlib_surface`
+- `VK_KHR_wayland_surface`
+- `VK_KHR_get_surface_capabilities2`
+- `VK_EXT_surface_maintenance1`
+- `VK_EXT_headless_surface` (optional)
+
+Device extensions:
+- `VK_KHR_swapchain`
+- `VK_KHR_shared_presentable_image`
+- `VK_EXT_image_compression_control_swapchain`
+- `VK_KHR_present_id`
+- `VK_EXT_swapchain_maintenance1`
 
 ## Building
 
 ### Dependencies
 
-* [CMake](https://cmake.org) version 3.4.3 or above.
-* C++17 compiler.
-* Vulkan® loader and associated headers with support for the
-  `VK_EXT_headless_surface` extension and for the Vulkan 1.1, or later API.
+- CMake >= 3.4.3
+- C++17 compiler
+- Vulkan loader and headers (1.1+)
+- libdrm
+- libwayland-client, wayland-protocols, wayland-scanner
+- libxcb, xcb-shm, xcb-sync, xcb-dri3, xcb-present
+- libX11, libX11-xcb, libXrandr
 
-The Vulkan WSI Layer uses Vulkan extensions to communicate with the Vulkan ICDs.
-The ICDs installed in the system are required to support the following extensions:
-* Instance extensions:
-  * VK_KHR_get_physical_device_properties_2
-  * VK_KHR_external_fence_capabilities
-  * VK_KHR_external_semaphore_capabilities
-  * VK_KHR_external_memory_capabilities
-* Device extensions (only required when Wayland support is enabled):
-  * VK_EXT_image_drm_format_modifier
-  * VK_KHR_image_format_list
-  * VK_EXT_external_memory_dma_buf
-  * VK_KHR_external_memory_fd
-  * VK_KHR_external_fence_fd
-* Any dependencies of the above extensions
-
-### Vulkan Header Version
-
-The Vulkan WSI Layer has been validated against Vulkan header version 1.4.299.
-
-If you are using a Vulkan header version newer than this, a warning will appear during compilation.
-
-### Building the Vulkan® loader
-
-This step is not necessary if your system already has a loader and associated
-headers with support for the `VK_EXT_headless_surface` extension. We include
-these instructions for completeness.
+### Build
 
 ```
-git clone https://github.com/KhronosGroup/Vulkan-Loader.git
-mkdir Vulkan-Loader/build
-cd Vulkan-Loader/build
-../scripts/update_deps.py
-cmake -C helper.cmake ..
-make
-make install
+mkdir build && cd build
+cmake .. \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_WSI_X11=ON \
+    -DBUILD_WSI_WAYLAND=ON \
+    -DSELECT_EXTERNAL_ALLOCATOR=dma_buf_heaps \
+    -DWSIALLOC_MEMORY_HEAP_NAME=system \
+    -DENABLE_WAYLAND_FIFO_PRESENTATION_THREAD=ON
+make -j$(nproc)
 ```
 
-### Building with headless support
+### Install
 
-The layer requires a version of the loader and headers that includes support for
-the `VK_EXT_headless_surface` extension. By default, the build system will use
-the system Vulkan® headers as reported by `pkg-config`. This may be overriden by
-specifying `VULKAN_CXX_INCLUDE` in the CMake configuration, for example:
+Copy the shared library and JSON manifest into a Vulkan implicit layer
+directory:
 
 ```
-cmake . -DVULKAN_CXX_INCLUDE="path/to/vulkan-headers"
+sudo cp libVkLayer_window_system_integration.so \
+        VkLayer_window_system_integration.json \
+        /usr/share/vulkan/implicit_layer.d/
 ```
 
-If the loader and associated headers already meet the requirements of the layer
-then the build steps are straightforward:
+The layer is loaded automatically by the Vulkan loader as an implicit layer.
 
-```
-cmake . -Bbuild
-make -C build
-```
+## Upstream repositories
 
-### Building with Wayland support
+- **Arm (original):** <https://gitlab.freedesktop.org/mesa/vulkan-wsi-layer>
+- **Ginkage (X11 SHM):** <https://github.com/ginkage/vulkan-wsi-layer>
 
-In order to build with Wayland support the `BUILD_WSI_WAYLAND` build option
-must be used, the `SELECT_EXTERNAL_ALLOCATOR` option has to be set to
-a graphics memory allocator (currently only ion and dma_buf_heaps are supported) and
-the `KERNEL_HEADER_DIR` option must be defined as the directory that includes the kernel headers.
-source.
+## Related projects
 
-```
-cmake . -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_WSI_HEADLESS=0 \
-        -DBUILD_WSI_WAYLAND=1 \
-        -DSELECT_EXTERNAL_ALLOCATOR=dma_buf_heaps \
-        -DWSIALLOC_MEMORY_HEAP_NAME=system-uncached \
-        -DENABLE_WAYLAND_FIFO_PRESENTATION_THREAD=1
-```
+This layer is part of [Sky1 Linux](https://github.com/Sky1-Linux), a Linux
+distribution for systems based on the CIX Sky1 / CD8180 SoC.
 
-In the command line above, `-DBUILD_WSI_HEADLESS=0` is used to disable support
-for `VK_EXT_headless_surface`, which is otherwise enabled by default.
+- [sky1-gpu-support](https://github.com/Sky1-Linux/sky1-gpu-support) -- userspace Mali driver and GPU switcher
+- [cix-gpu-kmd](https://github.com/Sky1-Linux/cix-gpu-kmd) -- Mali kernel driver module
 
-Note that a custom graphics memory allocator implementation can be provided
-using the `EXTERNAL_WSIALLOC_LIBRARY` option. For example,
+## License
 
-```
-cmake . -DVULKAN_CXX_INCLUDE="path/to/vulkan-header" \
-        -DBUILD_WSI_WAYLAND=1 \
-        -DEXTERNAL_WSIALLOC_LIBRARY="path/to/custom/libwsialloc" \
-        -DKERNEL_HEADER_DIR="path/to/linux-kernel-headers"
-```
-
-The `EXTERNAL_WSIALLOC_LIBRARY` option allows to specify the path to a library
-containing the implementation of the graphics memory allocator API, as
-described in [the wsialloc.h header file](util/wsialloc/wsialloc.h).
-The allocator is not only responsible for allocating graphics buffers, but is
-also responsible for selecting a suitable format that can be
-efficiently shared between the different devices in the system, e.g. GPU,
-display. It is therefore an important point of integration. It is expected
-that each system will need a tailored implementation, although the layer
-provides a generic ion and dma_buf_heaps implementations that may work in
-systems that support linear formats. This is selected by
-the `-DSELECT_EXTERNAL_ALLOCATOR=ion` option, as shown above.
-
-### Wayland support with FIFO presentation mode
-
-The WSI Layer has 2 FIFO implementations for the Wayland backend. One that
-blocks in vkQueuePresent and one that uses a presentation thread. This is due
-to the fact that the FIFO implementation that utilises the presentation thread
-in the Wayland backend is not strictly conformant to the Vulkan specification,
-however it has a much better performance due to not needing to block in vkQueuePresent.
-
-By default, the WSI Layer uses the queue present blocking FIFO implementation
-when using Wayland swapchains. This can be switched to instead use the presentation
-thread implementation by including the build option `ENABLE_WAYLAND_FIFO_PRESENTATION_THREAD`,
-along with the other build options mentioned in "Building with Wayland support"
-section.
-
-### Building with frame instrumentation support
-
-The layer can be built to pass frame boundary information down to other
-layers or ICD by making use of the [VK_EXT_frame_boundary extension](https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VK_EXT_frame_boundary.html).
-
-By enabling this feature, if application is not making use of the
-VK_EXT_frame_boundary extension, the layer will generate and pass down
-frame boundary events which enables the ability to instrument present submissions
-for applications that do not make use of this extension.
-
-In order to enable this feature `-DENABLE_INSTRUMENTATION=1` option can
-be passed at build time.
-
-## Installation
-
-Copy the shared library `libVkLayer_window_system_integration.so` and JSON
-configuration `VkLayer_window_system_integration.json` into a Vulkan®
-[implicit layer directory](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderLayerInterface.md#linux-layer-discovery).
-
-## Contributing
-
-We are open for contributions.
-
- * The software is provided under the MIT license. Contributions to this project
-   are accepted under the same license.
- * Please also ensure that each commit in the series has at least one
-   `Signed-off-by:` line, using your real name and email address. The names in
-   the `Signed-off-by:` and `Author:` lines must match. If anyone else
-   contributes to the commit, they must also add their own `Signed-off-by:`
-   line. By adding this line the contributor certifies the contribution is made
-   under the terms of the [Developer Certificate of Origin (DCO)](DCO.txt).
- * Questions, bug reports, et cetera are raised and discussed on the issues page.
- * Please make merge requests into the main branch.
- * Code should be formatted with clang-format using the project's .clang-format
-   configuration.
-
-We use [pre-commit](https://pre-commit.com/) for local git hooks to help ensure
-code quality and standardization. To install the hooks run the following
-commands in the root of the repository:
-
-    $ pip install pre-commit
-    $ pre-commit install
-
-Contributors are expected to abide by the
-[freedesktop.org code of conduct](https://www.freedesktop.org/wiki/CodeOfConduct/).
-
-### Implement a new WSI backend
-
-Instructions on how to implement a WSI backend can be found in the
-[README](wsi/README.md) in the wsi folder.
-
-## Trace
-
-When using other layers to trace content with the WSI Layer, special attention
-should be paid to the order of the layers by the Vulkan® loader. The Vulkan WSI
-Layer should be placed after the trace layer as it implements entrypoints that
-may not be implemented by the ICD.
-
-One way to avoid these kinds of issues is by using an implicit
-[meta-layer](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderLayerInterface.md#meta-layers)
-which will define the order of the layers and the WSI Layer should be placed at
-the bottom of the list.
-
-## Khronos® Conformance
-
-This software is based on a published Khronos® Specification and is expected to
-pass the relevant parts of the Khronos® Conformance Testing Process when used as
-part of a conformant Vulkan® implementation.
+MIT. See [LICENSE](LICENSE) for details.
