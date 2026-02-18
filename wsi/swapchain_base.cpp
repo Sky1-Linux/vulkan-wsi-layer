@@ -83,6 +83,10 @@ void swapchain_base::page_flip_thread()
          }
          assert(vk_res == VK_SUCCESS);
 
+         /* Check for shutdown after waking from semaphore wait. */
+         if (!m_page_flip_thread_run)
+            break;
+
          /* For continuous mode there will be only one image in the swapchain.
           * This image will always be used, and there is no pending state in this case. */
          submit_info.image_index = 0;
@@ -96,6 +100,10 @@ void swapchain_base::page_flip_thread()
             /* Image is not ready yet. */
             continue;
          }
+
+         /* Check for shutdown after waking from semaphore wait. */
+         if (!m_page_flip_thread_run)
+            break;
 
          /* We want to present the oldest queued for present image from our present queue,
           * which we can find at the sc->pending_buffer_pool.head index. */
@@ -586,13 +594,22 @@ VkResult swapchain_base::notify_presentation_engine(const pending_present_reques
       return VK_ERROR_OUT_OF_DATE_KHR;
    }
 
+   /* If the image is already PENDING (queued from a previous present without
+    * re-acquisition), skip the duplicate push.  The page_flip_thread will
+    * present the latest content when it processes the original entry because
+    * image_wait_present uses the image's current fence (set by the most
+    * recent image_set_present_payload call). */
+   if (m_swapchain_images[pending_present.image_index].status == swapchain_image::PENDING)
+   {
+      return VK_SUCCESS;
+   }
+
    m_swapchain_images[pending_present.image_index].status = swapchain_image::PENDING;
    m_started_presenting = true;
 
    if (m_page_flip_thread_run)
    {
       bool buffer_pool_res = m_pending_buffer_pool.push_back(pending_present);
-      (void)buffer_pool_res;
       assert(buffer_pool_res);
       m_page_flip_semaphore.post();
    }
@@ -755,6 +772,12 @@ VkResult swapchain_base::wait_for_free_buffer(uint64_t timeout)
          /* the sub-implementation has done it's thing, so re-check the
           * semaphore */
          retval = m_free_image_semaphore.wait(timeout);
+         if (retval == VK_NOT_READY)
+         {
+            /* get_free_buffer confirmed a buffer is available but the semaphore
+             * post may not have been visible yet. Retry with a brief wait. */
+            retval = m_free_image_semaphore.wait(1000000); /* 1 ms */
+         }
       }
    }
 

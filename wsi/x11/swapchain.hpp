@@ -55,6 +55,8 @@ extern "C" {
 #include "util/wsialloc/wsialloc.h"
 #include "wsi/external_memory.hpp"
 #include "shm_presenter.hpp"
+#include "dri3_presenter.hpp"
+#include "wayland_bypass.hpp"
 
 namespace wsi
 {
@@ -254,9 +256,21 @@ private:
    wsialloc_allocator *m_wsi_allocator;
 
    /**
-    * @brief Presentation strategy for this swapchain.
+    * @brief Xwayland bypass presenter (highest priority — direct Wayland DMA-BUF).
+    */
+   std::shared_ptr<wayland_bypass> m_wayland_bypass;
+
+   /**
+    * @brief DRI3 zero-copy presenter (when render node available).
+    */
+   std::unique_ptr<dri3_presenter> m_dri3_presenter;
+
+   /**
+    * @brief SHM fallback presenter (used when nothing else works).
     */
    std::unique_ptr<shm_presenter> m_shm_presenter;
+
+   enum class presenter_type { WAYLAND_BYPASS, DRI3, SHM } m_presenter = presenter_type::SHM;
 
    /**
     * @brief Image creation parameters used for all swapchain images.
@@ -280,6 +294,16 @@ private:
    uint64_t m_send_sbc;
    uint64_t m_target_msc;
 
+   /** Ring of recently presented images (bypass deferred-release).
+    *  We keep a 2-frame delay before freeing — on present N, we free
+    *  image N-2.  This gives the compositor 2 full frames to finish
+    *  reading before the app can reuse the buffer.
+    *  Only used when m_bypass_deferred_release is true (Zink/GL apps). */
+   static constexpr int BYPASS_DEFER_FRAMES = 2;
+   int m_bypass_deferred[BYPASS_DEFER_FRAMES] = { -1, -1 };
+   int m_bypass_defer_head = 0;
+   bool m_bypass_deferred_release = false;
+
    VkPhysicalDeviceMemoryProperties2 m_memory_props;
 
    void present_event_thread();
@@ -287,7 +311,6 @@ private:
    std::thread m_present_event_thread;
    std::mutex m_thread_status_lock;
    std::condition_variable m_thread_status_cond;
-   util::ring_buffer<xcb_pixmap_t, 6> m_free_buffer_pool;
 };
 
 } /* namespace x11 */

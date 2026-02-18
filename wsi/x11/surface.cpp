@@ -32,6 +32,7 @@
 #include "surface.hpp"
 #include "swapchain.hpp"
 #include "surface_properties.hpp"
+#include "wayland_bypass.hpp"
 
 namespace wsi
 {
@@ -130,6 +131,23 @@ util::unique_ptr<surface> surface::make_surface(const util::allocator &allocator
       WSI_LOG_ERROR("Failed to allocate surface for window 0x%x\n", window);
    }
    return nullptr;
+}
+
+std::shared_ptr<wayland_bypass> surface::get_or_create_bypass(uint32_t width, uint32_t height)
+{
+   if (m_bypass)
+      return m_bypass;
+
+   auto bypass = std::make_shared<wayland_bypass>();
+   if (!bypass->is_available())
+      return nullptr;
+
+   VkResult res = bypass->init(width, height);
+   if (res != VK_SUCCESS)
+      return nullptr;
+
+   m_bypass = bypass;
+   return m_bypass;
 }
 
 } /* namespace x11 */

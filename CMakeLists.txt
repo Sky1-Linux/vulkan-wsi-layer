@@ -262,12 +262,39 @@ endif()
 if(BUILD_WSI_X11)
    set(CMAKE_BUILD_TYPE "Debug")
 
+   # Generate xdg-shell protocol for Xwayland bypass
+   pkg_check_modules(WAYLAND_CLIENT_X11 wayland-client)
+   find_program(WAYLAND_SCANNER_X11 wayland-scanner REQUIRED)
+   pkg_check_modules(WAYLAND_PROTOCOLS_X11 wayland-protocols)
+   pkg_get_variable(WAYLAND_PROTOCOLS_DIR_X11 wayland-protocols pkgdatadir)
+
+   add_custom_target(x11_wayland_generated_files
+      COMMAND ${WAYLAND_SCANNER_X11} client-header
+      ${WAYLAND_PROTOCOLS_DIR_X11}/stable/xdg-shell/xdg-shell.xml
+      ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h
+      COMMAND ${WAYLAND_SCANNER_X11} public-code
+      ${WAYLAND_PROTOCOLS_DIR_X11}/stable/xdg-shell/xdg-shell.xml
+      ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
+      COMMAND ${WAYLAND_SCANNER_X11} client-header
+      ${WAYLAND_PROTOCOLS_DIR_X11}/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml
+      ${CMAKE_CURRENT_BINARY_DIR}/xdg-decoration-unstable-v1-client-protocol.h
+      COMMAND ${WAYLAND_SCANNER_X11} public-code
+      ${WAYLAND_PROTOCOLS_DIR_X11}/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml
+      ${CMAKE_CURRENT_BINARY_DIR}/xdg-decoration-unstable-v1-protocol.c
+      BYPRODUCTS xdg-shell-client-protocol.h xdg-shell-protocol.c
+         xdg-decoration-unstable-v1-client-protocol.h xdg-decoration-unstable-v1-protocol.c)
+
    add_library(wsi_x11 STATIC
       wsi/x11/drm_display.cpp
       wsi/x11/surface_properties.cpp
       wsi/x11/surface.cpp
       wsi/x11/swapchain.cpp
-      wsi/x11/shm_presenter.cpp)
+      wsi/x11/shm_presenter.cpp
+      wsi/x11/dri3_presenter.cpp
+      wsi/x11/wayland_bypass.cpp
+      ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
+      ${CMAKE_CURRENT_BINARY_DIR}/xdg-decoration-unstable-v1-protocol.c)
+   add_dependencies(wsi_x11 x11_wayland_generated_files wayland_generated_files)
 
    pkg_check_modules(LIBDRM REQUIRED libdrm)
    message(STATUS "Using libdrm include directories: ${LIBDRM_INCLUDE_DIRS}")
@@ -301,7 +328,8 @@ if(BUILD_WSI_X11)
    else()
       target_link_libraries(wsi_x11 wsialloc)
    endif()
-   list(APPEND LINK_WSI_LIBS wsi_x11 xcb xcb-shm xcb-sync X11-xcb X11 Xrandr)
+   target_link_libraries(wsi_x11 ${WAYLAND_CLIENT_X11_LDFLAGS})
+   list(APPEND LINK_WSI_LIBS wsi_x11 xcb xcb-shm xcb-sync xcb-dri3 xcb-present X11-xcb X11 Xrandr wayland-client)
 else()
    list(APPEND JSON_COMMANDS COMMAND sed -i '/VK_KHR_xcb_surface/d' ${CMAKE_CURRENT_BINARY_DIR}/VkLayer_window_system_integration.json)
    list(APPEND JSON_COMMANDS COMMAND sed -i '/VK_KHR_xlib_surface/d' ${CMAKE_CURRENT_BINARY_DIR}/VkLayer_window_system_integration.json)

@@ -27,6 +27,7 @@
  */
 
 #pragma once
+#include <memory>
 #include <vulkan/vk_icd.h>
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
@@ -78,6 +79,11 @@ public:
       return m_has_shm;
    }
 
+   /** Get or create the shared Wayland bypass presenter.
+    * The bypass persists across swapchain recreations to avoid
+    * creating new Wayland surfaces (which causes window jumping). */
+   std::shared_ptr<class wayland_bypass> get_or_create_bypass(uint32_t width, uint32_t height);
+
 private:
    xcb_connection_t *m_connection;
    xcb_window_t m_window;
@@ -86,6 +92,9 @@ private:
 
    /** X11 extension capabilities */
    bool m_has_shm = false;
+
+   /** Shared bypass presenter — persists across swapchain recreations. */
+   std::shared_ptr<class wayland_bypass> m_bypass;
 };
 
 } /* namespace x11 */
