@@ -294,11 +294,11 @@ private:
    uint64_t m_send_sbc;
    uint64_t m_target_msc;
 
-   /** Ring of recently presented images (bypass deferred-release).
+   /** Ring of recently presented images (deferred release for zero-copy presenters).
     *  We keep a 2-frame delay before freeing — on present N, we free
-    *  image N-2.  This gives the compositor 2 full frames to finish
-    *  reading before the app can reuse the buffer.
-    *  Only used when m_bypass_deferred_release is true (Zink/GL apps). */
+    *  image N-2.  This gives the compositor/X server 2 full frames to finish
+    *  reading before the app can reuse the buffer (prevents FBO flicker).
+    *  Used for both bypass and DRI3 presenters (async DMA-BUF presentation). */
    static constexpr int BYPASS_DEFER_FRAMES = 2;
    int m_bypass_deferred[BYPASS_DEFER_FRAMES] = { -1, -1 };
    int m_bypass_defer_head = 0;

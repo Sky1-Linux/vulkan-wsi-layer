@@ -359,10 +359,13 @@ VkResult swapchain::init_platform(VkDevice device, const VkSwapchainCreateInfoKH
       }
    }
 
-   /* Deferred release for bypass presenter: keeps a 2-frame delay before
-    * returning buffers.  DRI3 uses immediate release — the Present extension
-    * handles buffer synchronization via idle-notify events. */
-   m_bypass_deferred_release = (m_presenter == presenter_type::WAYLAND_BYPASS);
+   /* Deferred release for zero-copy presenters: keeps a 2-frame delay before
+    * returning buffers.  Both bypass and DRI3 present DMA-BUFs asynchronously —
+    * the compositor/X server may still be reading the buffer when the call
+    * returns.  Without the delay, the app renders into a buffer the server
+    * is still scanning out, causing FBO flicker. */
+   m_bypass_deferred_release = (m_presenter == presenter_type::WAYLAND_BYPASS ||
+                                m_presenter == presenter_type::DRI3);
 
    try
    {
@@ -922,12 +925,26 @@ void swapchain::present_image(const pending_present_request &pending_present)
    {
       present_result = m_dri3_presenter->present_image(image_data, serial);
 
-      if (present_result != VK_SUCCESS)
+      if (present_result == VK_SUCCESS)
+      {
+         if (m_bypass_deferred_release)
+         {
+            int oldest = m_bypass_deferred[m_bypass_defer_head];
+            if (oldest >= 0)
+               unpresent_image(oldest);
+            m_bypass_deferred[m_bypass_defer_head] = pending_present.image_index;
+            m_bypass_defer_head = (m_bypass_defer_head + 1) % BYPASS_DEFER_FRAMES;
+         }
+         else
+         {
+            unpresent_image(pending_present.image_index);
+         }
+      }
+      else
+      {
          WSI_LOG_ERROR("Failed to present image using DRI3: %d", present_result);
-
-      /* With XCB_PRESENT_OPTION_COPY the X server copies immediately,
-       * so the buffer is safe to reuse right away. */
-      unpresent_image(pending_present.image_index);
+         unpresent_image(pending_present.image_index);
+      }
    }
    else
    {
